@@ -1,0 +1,311 @@
+---
+title: "Riqueza de especies"
+---
+
+**NOTA**: Para evitar errores en las operaciones con proyecciones, antes de ejecutar el programa, en la línea de comandos se ejecutó:
+
+```bash
+export PROJ_LIB=/home/mfvargas/miniconda3/envs/biodatacr-r/share/proj
+```
+
+```{r}
+#| label: carga-instalacion-paquetes
+#| echo: false
+#| warning: false
+#| message: false
+
+# Instalación
+# devtools::install_github("ManuelSpinola/crhexgrids")
+
+# Carga de paquetes
+library(dplyr)
+library(DT)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(leafem)
+library(viridisLite)
+library(crhexgrids)
+```
+
+
+# Especies en la lista roja de la UICN
+
+**0. Carga de registros de presencia**  
+
+```{r}
+#| label: carga-registros-presencia-lista-roja
+#| warning: false
+#| message: false
+#| code-fold: show
+
+# Carga de registros de presencia
+registros_presencia_lista_roja <-
+  st_read(
+    "registros-presencia-lista-roja.csv",
+  	
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude", # columna de longitud decimal
+      "Y_POSSIBLE_NAMES=decimalLatitude"   # columna de latitud decimal
+    ),
+    quiet = TRUE
+  )
+
+# Asignación del CRS WGS84
+st_crs(registros_presencia_lista_roja) <- 4326
+```
+
+
+```{r}
+#| label: mapa-leaflet-registros-presencia-lista-roja
+#| eval: false
+#| echo: false
+#| warning: false
+#| message: false
+#| code-fold: true
+#| code-summary: "Código para generar el mapa leaflet de registros de presencia"
+
+# Factor de color basado en los valores únicos de especies
+colores_especies <- colorFactor(
+  palette = viridis(length(unique(registros_presencia_lista_roja$species))), 
+  domain = registros_presencia_lista_roja$species
+)
+
+# Mapa leaflet de cantones y registros de presencia de félidos
+leaflet() |>
+  setView(
+    lng = -84.19452,
+    lat = 9.572735,
+    zoom = 7
+  ) |>  
+  addTiles(group = "Mapa general (OpenStreetMap)") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales (ESRI World Imagery)"
+  ) |>  
+  addPolygons(
+    data = cr_hex_grid_res_5,
+    color = "black",
+    fillColor = "transparent",
+    stroke = TRUE,
+    weight = 1.5,
+    group = "Hexágonos"
+  ) |>  
+  addCircleMarkers(
+    data = registros_presencia_lista_roja,
+    stroke = F,
+    radius = 2,
+    fillColor = ~colores_especies(registros_presencia_lista_roja$species),
+    fillOpacity = 1.0,
+    popup = paste(
+      paste0("<strong>Especie: </strong>", registros_presencia_lista_roja$species),
+      paste0("<strong>Localidad: </strong>", registros_presencia_lista_roja$locality),
+      paste0("<strong>Fecha: </strong>", registros_presencia_lista_roja$eventDate),
+      paste0("<strong>Fuente: </strong>", registros_presencia_lista_roja$institutionCode),
+      paste0("<a href='", registros_presencia_lista_roja$occurrenceID, "'>Más información</a>"),
+      sep = '<br/>'
+    ),    
+    group = "Registros de presencia"
+  ) |>
+  addScaleBar(
+    position = "bottomleft", 
+    options = scaleBarOptions(imperial = FALSE)
+  ) |>  
+  addLayersControl(
+    baseGroups = c(
+      "Mapa general (OpenStreetMap)", 
+      "Imágenes satelitales (ESRI World Imagery)"
+    ),
+    overlayGroups = c("Hexágonos", "Registros de presencia")
+  ) |>
+  addResetMapButton() |>
+  addSearchOSM() |>
+  addMouseCoordinates() |>
+  addMiniMap(position = "bottomright") |>
+  addFullscreenControl()
+```
+
+**1. Unión espacial de registros de presencia y hexágonos**  
+
+```{r}
+#| label: union-registros-presencia-lista-roja-hexagonos
+#| warning: false
+#| message: false
+#| code-fold: show
+
+# Unión espacial de registros de presencia y hexágonos (solo la columna cod_canton),
+# mediante el predicado st_within().
+# Como resultado, cod_canton se une al conjunto de datos de félidos.
+registros_presencia_union_hexagonos <- 
+  st_join(
+    x = registros_presencia_lista_roja,
+    y = dplyr::select(cr_hex_grid_res_5, h3_address), # selección de columna cod_canton
+    join = st_within
+  )
+
+# Despliegue de los datos unidos
+registros_presencia_union_hexagonos |>
+  st_drop_geometry() |>
+  dplyr::select(species, locality, h3_address) |>
+  datatable(
+    colnames = c("Especie", "Localidad", "Código de hexágono"),
+    options = list(
+      pageLength = 5,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+**2. Conteo de la cantidad de especies de félidos en cada cantón**  
+
+```{r}
+#| label: conteo-especies-registros-presencia-lista-roja-hexagonos
+#| warning: false
+#| message: false
+#| code-fold: show
+
+# Conteo de la cantidad de especies
+riqueza_especies_registros_presencia_lista_roja_hexagonos <-
+  registros_presencia_union_hexagonos |>
+  st_drop_geometry() |>
+  group_by(h3_address) |>
+  summarize(riqueza_especies = n_distinct(species, na.rm = TRUE))
+
+# Despliegue de la cantidad de especies en cada hexágono
+riqueza_especies_registros_presencia_lista_roja_hexagonos |>
+  arrange(desc(riqueza_especies)) |>
+  datatable(
+    colnames = c("Código de hexágono", "Riqueza de especies"),
+    options = list(
+      pageLength = 5,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+**3. Unión no espacial de hexágonos con el dataframe de riqueza de especies en hexágonos**  
+
+```{r}
+#| label: riqueza-registros-presencia-lista-roja-hexagonos
+#| warning: false
+#| message: false
+#| code-fold: show
+
+# Unión (no espacial) de hexágonos y riqueza de especies
+hexagonos_union_riqueza <-
+  left_join(
+    x = cr_hex_grid_res_5,
+    y = dplyr::select(
+    	riqueza_especies_registros_presencia_lista_roja_hexagonos, 
+    	h3_address, 
+    riqueza_especies),
+    by = "h3_address"
+  ) |>
+  replace_na(list(riqueza_especies = 0))
+
+# Despliegue de los datos de riqueza de especies en hexágonos
+hexagonos_union_riqueza |>
+  st_drop_geometry() |>
+  dplyr::select(h3_address, riqueza_especies) |>
+  arrange(desc(riqueza_especies)) |>
+  datatable(
+    colnames = c("Hexágono", "Riqueza de especies"),
+    options = list(
+      pageLength = 5,
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+**4. Mapa de riqueza de especies**  
+
+```{r}
+#| label: mapa-riqueza-especies-registros-presencia-lista-roja-hexagonos
+#| warning: false
+#| message: false
+#| code-fold: true
+
+# Paleta de colores de riqueza de especies
+colores_riqueza_especies <-
+  colorNumeric(
+    palette = "Reds",
+    domain = hexagonos_union_riqueza$riqueza_especies,
+    na.color = "transparent"
+  )
+
+# Paleta de colores de especies
+colores_especies <- colorFactor(
+  palette = viridis(length(unique(registros_presencia_lista_roja$species))), 
+  domain = registros_presencia_lista_roja$species
+)
+
+# Mapa leaflet
+leaflet() |>
+  setView(
+    lng = -84.19452,
+    lat = 9.572735,
+    zoom = 7) |>
+  addTiles(group = "Mapa general (OpenStreetMap)") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales (ESRI World Imagery)"
+  ) |> 
+  addPolygons(
+    data = hexagonos_union_riqueza,
+    fillColor = ~ colores_riqueza_especies(hexagonos_union_riqueza$riqueza_especies),
+    fillOpacity = 0.8,
+    color = "black",
+    stroke = TRUE,
+    weight = 1.0,
+    popup = paste(
+      paste("<strong>Hexágono:</strong>", hexagonos_union_riqueza$h3_address),
+      paste("<strong>Riqueza de especies:</strong>", hexagonos_union_riqueza$riqueza_especies),
+      sep = '<br/>'
+    ),
+    group = "Riqueza de especies"
+  ) |>
+  addScaleBar(
+    position = "bottomleft", 
+    options = scaleBarOptions(imperial = FALSE)
+  ) |>    
+  addLegend(
+    position = "bottomleft",
+    pal = colores_riqueza_especies,
+    values = hexagonos_union_riqueza$riqueza_especies,
+    group = "Riqueza de especies",
+    title = "Riqueza de especies"
+  ) |>
+  addCircleMarkers(
+    data = registros_presencia_lista_roja,
+    stroke = F,
+    radius = 4,
+    fillColor = ~colores_especies(registros_presencia_lista_roja$species),
+    fillOpacity = 1.0,
+    popup = paste(
+      paste0("<strong>Especie: </strong>", registros_presencia_lista_roja$species),
+      paste0("<strong>Localidad: </strong>", registros_presencia_lista_roja$locality),
+      paste0("<strong>Fecha: </strong>", registros_presencia_lista_roja$eventDate),
+      paste0("<strong>Fuente: </strong>", registros_presencia_lista_roja$institutionCode),
+      paste0("<a href='", registros_presencia_lista_roja$occurrenceID, "'>Más información</a>"),
+      sep = '<br/>'
+    ),    
+    group = "Registros de presencia"
+  ) |>  
+  addLayersControl(
+    baseGroups = c(
+      "Mapa general (OpenStreetMap)", 
+      "Imágenes satelitales (ESRI World Imagery)"
+    ),
+    overlayGroups = c(
+      "Riqueza de especies",
+      "Registros de presencia"
+    )
+  ) |>
+  addResetMapButton() |>
+  addSearchOSM() |>
+  addMouseCoordinates() |>
+  addFullscreenControl() |>
+  hideGroup("Registros de presencia") 
+```
